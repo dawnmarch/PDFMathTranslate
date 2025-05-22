@@ -97,6 +97,20 @@ page_map = {
     "Others": None,
 }
 
+# 默认翻译服务
+service_map = {
+    "OpenAI": OpenAITranslator,
+}
+
+lang_map = {
+    "中文": "zh",
+    "英语": "en",
+}
+
+page_map = {
+    "All": None,
+}
+
 # Check if this is a public demo, which has resource limits
 flag_demo = False
 
@@ -193,6 +207,44 @@ def stop_translate_file(state: dict) -> None:
     if session_id in cancellation_event_map:
         logger.info(f"Stopping translation for session {session_id}")
         cancellation_event_map[session_id].set()
+
+
+def remove_no_watermark_from_filename(file_path):
+    """从文件名中移除 no_watermark 标记并重命名文件"""
+    if not file_path:
+        return file_path
+        
+    # 创建Path对象更方便处理文件操作
+    import os
+    from pathlib import Path
+    
+    path = Path(file_path)
+    # 检查文件名中是否包含 .no_watermark.
+    if ".no_watermark." in path.name:
+        # 创建新的文件名（替换.no_watermark.为.）
+        new_name = str(path.name).replace(".no_watermark.", ".")
+        new_path = path.parent / new_name
+        
+        # 重命名文件
+        try:
+            os.rename(file_path, new_path)
+            logger.info(f"重命名文件: {path} -> {new_path}")
+            return str(new_path)
+        except Exception as e:
+            logger.error(f"重命名文件失败: {e}")
+    
+    return file_path
+
+
+def hide_results():
+    return (
+        None,  # output_file_mono
+        None,  # preview保持不变
+        None,  # output_file_dual
+        gr.update(visible=False),  # output_file_mono visibility
+        gr.update(visible=False),  # output_file_dual visibility
+        gr.update(visible=False),  # output_title visibility
+    )
 
 
 def translate_file(
@@ -417,6 +469,9 @@ def babeldoc_translate_file(**kwargs):
             disable_rich_text_translate=not isinstance(translator, OpenAITranslator),
             skip_clean=kwargs["skip_subset_fonts"],
             report_interval=0.5,
+            watermark_output_mode="no_watermark",
+            ocr_workaround=False,
+            min_text_length=2
         )
 
         async def yadt_translate_coro(yadt_config):
@@ -441,6 +496,11 @@ def babeldoc_translate_file(**kwargs):
                         logger.info(f"  Dual PDF: {result.dual_pdf_path or 'None'}")
                         file_mono = result.mono_pdf_path
                         file_dual = result.dual_pdf_path
+
+                        # 处理文件名中的 no_watermark
+                        file_mono = remove_no_watermark_from_filename(file_mono)
+                        file_dual = remove_no_watermark_from_filename(file_dual)
+
                         break
             import gc
 
@@ -521,7 +581,7 @@ cancellation_event_map = {}
 
 # The following code creates the GUI
 with gr.Blocks(
-    title="PDFMathTranslate - PDF Translation with preserved formats",
+    title="PDF 文件翻译",
     theme=gr.themes.Default(
         primary_hue=custom_blue, spacing_size="md", radius_size="lg"
     ),
@@ -529,16 +589,17 @@ with gr.Blocks(
     head=demo_recaptcha if flag_demo else "",
 ) as demo:
     gr.Markdown(
-        "# [PDFMathTranslate @ GitHub](https://github.com/Byaidu/PDFMathTranslate)"
+        "# PDF 文件翻译"
     )
 
     with gr.Row():
         with gr.Column(scale=1):
-            gr.Markdown("## File | < 5 MB" if flag_demo else "## File")
+            gr.Markdown("## File | < 5 MB" if flag_demo else "## 文件")
             file_type = gr.Radio(
                 choices=["File", "Link"],
                 label="Type",
                 value="File",
+                visible=False,
             )
             file_input = gr.File(
                 label="File",
@@ -552,11 +613,12 @@ with gr.Blocks(
                 visible=False,
                 interactive=True,
             )
-            gr.Markdown("## Option")
+            gr.Markdown("## 选项")
             service = gr.Dropdown(
                 label="Service",
                 choices=enabled_services,
                 value=enabled_services[0],
+                visible=False,
             )
             envs = []
             for i in range(3):
@@ -567,20 +629,28 @@ with gr.Blocks(
                     )
                 )
             with gr.Row():
+                translation_direction = gr.Radio(
+                    label="翻译方向",
+                    choices=["中译英", "英译中"],
+                    value="中译英",  # 默认选择英译中
+                )
                 lang_from = gr.Dropdown(
                     label="Translate from",
                     choices=lang_map.keys(),
-                    value=ConfigManager.get("PDF2ZH_LANG_FROM", "English"),
+                    value=ConfigManager.get("PDF2ZH_LANG_FROM", "英语"),
+                    visible=False
                 )
                 lang_to = gr.Dropdown(
                     label="Translate to",
                     choices=lang_map.keys(),
-                    value=ConfigManager.get("PDF2ZH_LANG_TO", "Simplified Chinese"),
+                    value=ConfigManager.get("PDF2ZH_LANG_TO", "中文"),
+                    visible=False
                 )
             page_range = gr.Radio(
                 choices=page_map.keys(),
                 label="Pages",
                 value=list(page_map.keys())[0],
+                visible=False,
             )
 
             page_input = gr.Textbox(
@@ -589,7 +659,7 @@ with gr.Blocks(
                 interactive=True,
             )
 
-            with gr.Accordion("Open for More Experimental Options!", open=False):
+            with gr.Accordion("Open for More Experimental Options!", open=False, visible=False):
                 gr.Markdown("#### Experimental")
                 threads = gr.Textbox(
                     label="number of threads", interactive=True, value="4"
@@ -609,7 +679,7 @@ with gr.Blocks(
                     label="Custom Prompt for llm", interactive=True, visible=False
                 )
                 use_babeldoc = gr.Checkbox(
-                    label="Use BabelDOC", interactive=True, value=False
+                    label="Use BabelDOC", interactive=True, value=True
                 )
                 envs.append(prompt)
 
@@ -623,7 +693,7 @@ with gr.Blocks(
                     value = ConfigManager.get_env_by_translatername(
                         translator, env[0], env[1]
                     )
-                    visible = True
+                    visible = False
                     if hidden_gradio_details:
                         if (
                             "MODEL" not in str(label).upper()
@@ -658,7 +728,7 @@ with gr.Blocks(
                 ConfigManager.set("PDF2ZH_VFONT", value)
                 return value
 
-            output_title = gr.Markdown("## Translated", visible=False)
+            output_title = gr.Markdown("## 翻译结果", visible=False)
             output_file_mono = gr.File(
                 label="Download Translation (Mono)", visible=False
             )
@@ -669,12 +739,12 @@ with gr.Blocks(
                 label="reCAPTCHA Response", elem_id="verify", visible=False
             )
             recaptcha_box = gr.HTML('<div id="recaptcha-box"></div>')
-            translate_btn = gr.Button("Translate", variant="primary")
-            cancellation_btn = gr.Button("Cancel", variant="secondary")
-            tech_details_tog = gr.Markdown(
-                tech_details_string,
-                elem_classes=["secondary-text"],
-            )
+            translate_btn = gr.Button("翻译", variant="primary")
+            cancellation_btn = gr.Button("取消", variant="secondary")
+            # tech_details_tog = gr.Markdown(
+            #     tech_details_string,
+            #     elem_classes=["secondary-text"],
+            # )
             page_range.select(on_select_page, page_range, page_input)
             service.select(
                 on_select_service,
@@ -704,7 +774,7 @@ with gr.Blocks(
             )
 
         with gr.Column(scale=2):
-            gr.Markdown("## Preview")
+            gr.Markdown("## 预览")
             preview = PDF(label="Document Preview", visible=True, height=2000)
 
     # Event handlers
@@ -732,6 +802,17 @@ with gr.Blocks(
     state = gr.State({"session_id": None})
 
     translate_btn.click(
+        hide_results,
+        inputs=[],
+        outputs=[
+            output_file_mono,
+            preview,
+            output_file_dual,
+            output_file_mono,
+            output_file_dual,
+            output_title,
+        ]
+    ).then(
         translate_file,
         inputs=[
             file_type,
@@ -766,6 +847,26 @@ with gr.Blocks(
         stop_translate_file,
         inputs=[state],
     )
+
+    # 在创建完 demo 后添加这行代码
+    demo.load(fn=lambda: on_select_service(service.value, None), outputs=envs)
+
+    # 添加一个处理函数来根据单选按钮的值更新lang_from和lang_to
+    def on_translation_direction_change(direction):
+        if direction == "中译英":
+            return gr.update(value="中文"), gr.update(value="英语")
+        else:  # 英译中
+            return gr.update(value="英语"), gr.update(value="中文")
+
+    # 将单选按钮与处理函数连接起来
+    translation_direction.change(
+        fn=on_translation_direction_change,
+        inputs=[translation_direction],
+        outputs=[lang_from, lang_to]
+    )
+
+    # 在demo.load后面添加这行
+    demo.load(fn=lambda: on_translation_direction_change("中译英"), outputs=[lang_from, lang_to])
 
 
 def parse_user_passwd(file_path: str) -> tuple:
@@ -884,5 +985,5 @@ def setup_gui(
 
 # For auto-reloading while developing
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
     setup_gui()
