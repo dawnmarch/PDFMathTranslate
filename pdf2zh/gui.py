@@ -49,45 +49,6 @@ from babeldoc import __version__ as babeldoc_version
 logger = logging.getLogger(__name__)
 
 BABELDOC_MODEL = OnnxModel.load_available()
-# The following variables associate strings with translators
-service_map: dict[str, BaseTranslator] = {
-    "Google": GoogleTranslator,
-    "Bing": BingTranslator,
-    "DeepL": DeepLTranslator,
-    "DeepLX": DeepLXTranslator,
-    "Ollama": OllamaTranslator,
-    "Xinference": XinferenceTranslator,
-    "AzureOpenAI": AzureOpenAITranslator,
-    "OpenAI": OpenAITranslator,
-    "Zhipu": ZhipuTranslator,
-    "ModelScope": ModelScopeTranslator,
-    "Silicon": SiliconTranslator,
-    "Gemini": GeminiTranslator,
-    "Azure": AzureTranslator,
-    "Tencent": TencentTranslator,
-    "Dify": DifyTranslator,
-    "AnythingLLM": AnythingLLMTranslator,
-    "Argos Translate": ArgosTranslator,
-    "Grok": GrokTranslator,
-    "Groq": GroqTranslator,
-    "DeepSeek": DeepseekTranslator,
-    "OpenAI-liked": OpenAIlikedTranslator,
-    "Ali Qwen-Translation": QwenMtTranslator,
-}
-
-# The following variables associate strings with specific languages
-lang_map = {
-    "Simplified Chinese": "zh",
-    "Traditional Chinese": "zh-TW",
-    "English": "en",
-    "French": "fr",
-    "German": "de",
-    "Japanese": "ja",
-    "Korean": "ko",
-    "Russian": "ru",
-    "Spanish": "es",
-    "Italian": "it",
-}
 
 # The following variable associate strings with page ranges
 page_map = {
@@ -97,11 +58,13 @@ page_map = {
     "Others": None,
 }
 
-# 默认翻译服务
+# 翻译服务
 service_map = {
     "OpenAI": OpenAITranslator,
 }
+enabled_services = list(service_map.keys())
 
+# 语言映射
 lang_map = {
     "中文": "zh",
     "英语": "en",
@@ -111,55 +74,17 @@ page_map = {
     "All": None,
 }
 
-# Check if this is a public demo, which has resource limits
-flag_demo = False
-
-# Limit resources
-if ConfigManager.get("PDF2ZH_DEMO"):
-    flag_demo = True
-    service_map = {
-        "Google": GoogleTranslator,
-    }
-    page_map = {
-        "First": [0],
-        "First 20 pages": list(range(0, 20)),
-    }
-    client_key = ConfigManager.get("PDF2ZH_CLIENT_KEY")
-    server_key = ConfigManager.get("PDF2ZH_SERVER_KEY")
-
-
-# Limit Enabled Services
-enabled_services: T.Optional[T.List[str]] = ConfigManager.get("ENABLED_SERVICES")
-if isinstance(enabled_services, list):
-    default_services = ["Google", "Bing"]
-    enabled_services_names = [str(_).lower().strip() for _ in enabled_services]
-    enabled_services = [
-        k
-        for k in service_map.keys()
-        if str(k).lower().strip() in enabled_services_names
-    ]
-    if len(enabled_services) == 0:
-        raise RuntimeError("No services available.")
-    enabled_services = default_services + enabled_services
-else:
-    enabled_services = list(service_map.keys())
-
+threads = 4
+skip_subset_fonts = False
+ignore_cache = False
+vfont = ConfigManager.get("PDF2ZH_VFONT", "")
+prompt = ""
+use_babeldoc = True
 
 # Configure about Gradio show keys
 hidden_gradio_details: bool = bool(ConfigManager.get("HIDDEN_GRADIO_DETAILS"))
 
-
-# Public demo control
-def verify_recaptcha(response):
-    """
-    This function verifies the reCAPTCHA response.
-    """
-    recaptcha_url = "https://www.google.com/recaptcha/api/siteverify"
-    data = {"secret": server_key, "response": response}
-    result = requests.post(recaptcha_url, data=data).json()
-    return result.get("success")
-
-
+# 下载文件
 def download_with_limit(url: str, save_path: str, size_limit: int) -> str:
     """
     This function downloads a file from a URL and saves it to a specified path.
@@ -191,7 +116,7 @@ def download_with_limit(url: str, save_path: str, size_limit: int) -> str:
                 file.write(chunk)
     return save_path / filename
 
-
+# 取消翻译
 def stop_translate_file(state: dict) -> None:
     """
     This function stops the translation process.
@@ -208,7 +133,7 @@ def stop_translate_file(state: dict) -> None:
         logger.info(f"Stopping translation for session {session_id}")
         cancellation_event_map[session_id].set()
 
-
+# 移除文件名中的 no_watermark 标记并重命名文件
 def remove_no_watermark_from_filename(file_path):
     """从文件名中移除 no_watermark 标记并重命名文件"""
     if not file_path:
@@ -235,7 +160,7 @@ def remove_no_watermark_from_filename(file_path):
     
     return file_path
 
-
+# 隐藏翻译结果
 def hide_results():
     return (
         None,  # output_file_mono
@@ -246,7 +171,7 @@ def hide_results():
         gr.update(visible=False),  # output_title visibility
     )
 
-
+# 翻译文件
 def translate_file(
     file_type,
     file_input,
@@ -262,7 +187,6 @@ def translate_file(
     ignore_cache,
     vfont,
     use_babeldoc,
-    recaptcha_response,
     state,
     progress=gr.Progress(),
     *envs,
@@ -281,7 +205,10 @@ def translate_file(
         - page_input: The input for the page range
         - prompt: The custom prompt for the llm
         - threads: The number of threads to use
-        - recaptcha_response: The reCAPTCHA response
+        - skip_subset_fonts: Whether to skip subsetting fonts
+        - ignore_cache: Whether to ignore cache
+        - vfont: The font regex
+        - use_babeldoc: Whether to use babeldoc
         - state: The state of the translation process
         - progress: The progress bar
         - envs: The environment variables
@@ -297,10 +224,8 @@ def translate_file(
     session_id = uuid.uuid4()
     state["session_id"] = session_id
     cancellation_event_map[session_id] = asyncio.Event()
+    
     # Translate PDF content using selected service.
-    if flag_demo and not verify_recaptcha(recaptcha_response):
-        raise gr.Error("reCAPTCHA fail")
-
     progress(0, desc="Starting translation...")
 
     output = Path("pdf2zh_files")
@@ -316,7 +241,7 @@ def translate_file(
         file_path = download_with_limit(
             link_input,
             output,
-            5 * 1024 * 1024 if flag_demo else None,
+            None,
         )
 
     filename = os.path.splitext(os.path.basename(file_path))[0]
@@ -353,6 +278,7 @@ def translate_file(
 
     def progress_bar(t: tqdm.tqdm):
         desc = getattr(t, "desc", "Translating...")
+        print("xxxxxxxxxx", desc)
         if desc == "":
             desc = "Translating..."
         progress(t.n / t.total, desc=desc)
@@ -369,7 +295,7 @@ def translate_file(
         "lang_out": lang_to,
         "service": f"{translator.name}",
         "output": output,
-        "thread": int(threads),
+        "threads": int(threads),
         "callback": progress_bar,
         "cancellation_event": cancellation_event_map[session_id],
         "envs": _envs,
@@ -403,7 +329,7 @@ def translate_file(
         gr.update(visible=True),
     )
 
-
+# 使用 BabelDOC 翻译文件
 def babeldoc_translate_file(**kwargs):
     from babeldoc.high_level import init as babeldoc_init
 
@@ -464,7 +390,7 @@ def babeldoc_translate_file(**kwargs):
             lang_out=kwargs["lang_out"],
             no_dual=False,
             no_mono=False,
-            qps=kwargs["thread"],
+            qps=kwargs["threads"],
             use_rich_pbar=False,
             disable_rich_text_translate=not isinstance(translator, OpenAITranslator),
             skip_clean=kwargs["skip_subset_fonts"],
@@ -473,7 +399,7 @@ def babeldoc_translate_file(**kwargs):
             ocr_workaround=False,
             min_text_length=2
         )
-
+        # 翻译文件
         async def yadt_translate_coro(yadt_config):
             progress_context, progress_handler = create_progress_handler(yadt_config)
 
@@ -517,6 +443,7 @@ def babeldoc_translate_file(**kwargs):
         return asyncio.run(yadt_translate_coro(yadt_config))
 
 
+# 配置界面
 # Global setup
 custom_blue = gr.themes.Color(
     c50="#E8F3FF",
@@ -557,27 +484,7 @@ custom_css = """
     }
     """
 
-demo_recaptcha = """
-    <script src="https://www.google.com/recaptcha/api.js?render=explicit" async defer></script>
-    <script type="text/javascript">
-        var onVerify = function(token) {
-            el=document.getElementById('verify').getElementsByTagName('textarea')[0];
-            el.value=token;
-            el.dispatchEvent(new Event('input'));
-        };
-    </script>
-    """
-
-tech_details_string = f"""
-                    <summary>Technical details</summary>
-                    - GitHub: <a href="https://github.com/Byaidu/PDFMathTranslate">Byaidu/PDFMathTranslate</a><br>
-                    - BabelDOC: <a href="https://github.com/funstory-ai/BabelDOC">funstory-ai/BabelDOC</a><br>
-                    - GUI by: <a href="https://github.com/reycn">Rongxin</a><br>
-                    - pdf2zh Version: {__version__} <br>
-                    - BabelDOC Version: {babeldoc_version}
-                """
 cancellation_event_map = {}
-
 
 # The following code creates the GUI
 with gr.Blocks(
@@ -586,7 +493,6 @@ with gr.Blocks(
         primary_hue=custom_blue, spacing_size="md", radius_size="lg"
     ),
     css=custom_css,
-    head=demo_recaptcha if flag_demo else "",
 ) as demo:
     gr.Markdown(
         "# PDF 文件翻译"
@@ -594,13 +500,8 @@ with gr.Blocks(
 
     with gr.Row():
         with gr.Column(scale=1):
-            gr.Markdown("## File | < 5 MB" if flag_demo else "## 文件")
-            file_type = gr.Radio(
-                choices=["File", "Link"],
-                label="Type",
-                value="File",
-                visible=False,
-            )
+            gr.Markdown("## 文件")
+            file_type = "File"
             file_input = gr.File(
                 label="File",
                 file_count="single",
@@ -629,22 +530,16 @@ with gr.Blocks(
                     )
                 )
             with gr.Row():
-                translation_direction = gr.Radio(
-                    label="翻译方向",
-                    choices=["中译英", "英译中"],
-                    value="中译英",  # 默认选择英译中
-                )
                 lang_from = gr.Dropdown(
                     label="Translate from",
                     choices=lang_map.keys(),
-                    value=ConfigManager.get("PDF2ZH_LANG_FROM", "英语"),
+                    value=ConfigManager.get("PDF2ZH_LANG_FROM", "中文"),
                     visible=False
                 )
                 lang_to = gr.Dropdown(
-                    label="Translate to",
+                    label="目标语言",
                     choices=lang_map.keys(),
-                    value=ConfigManager.get("PDF2ZH_LANG_TO", "中文"),
-                    visible=False
+                    value=ConfigManager.get("PDF2ZH_LANG_TO", "英语"),
                 )
             page_range = gr.Radio(
                 choices=page_map.keys(),
@@ -659,30 +554,7 @@ with gr.Blocks(
                 interactive=True,
             )
 
-            with gr.Accordion("Open for More Experimental Options!", open=False, visible=False):
-                gr.Markdown("#### Experimental")
-                threads = gr.Textbox(
-                    label="number of threads", interactive=True, value="4"
-                )
-                skip_subset_fonts = gr.Checkbox(
-                    label="Skip font subsetting", interactive=True, value=False
-                )
-                ignore_cache = gr.Checkbox(
-                    label="Ignore cache", interactive=True, value=False
-                )
-                vfont = gr.Textbox(
-                    label="Custom formula font regex (vfont)",
-                    interactive=True,
-                    value=ConfigManager.get("PDF2ZH_VFONT", ""),
-                )
-                prompt = gr.Textbox(
-                    label="Custom Prompt for llm", interactive=True, visible=False
-                )
-                use_babeldoc = gr.Checkbox(
-                    label="Use BabelDOC", interactive=True, value=True
-                )
-                envs.append(prompt)
-
+            # 选择翻译服务
             def on_select_service(service, evt: gr.EventData):
                 translator = service_map[service]
                 _envs = []
@@ -712,21 +584,11 @@ with gr.Blocks(
                 _envs[-1] = gr.update(visible=translator.CustomPrompt)
                 return _envs
 
-            def on_select_filetype(file_type):
-                return (
-                    gr.update(visible=file_type == "File"),
-                    gr.update(visible=file_type == "Link"),
-                )
-
             def on_select_page(choice):
                 if choice == "Others":
                     return gr.update(visible=True)
                 else:
                     return gr.update(visible=False)
-
-            def on_vfont_change(value):
-                ConfigManager.set("PDF2ZH_VFONT", value)
-                return value
 
             output_title = gr.Markdown("## 翻译结果", visible=False)
             output_file_mono = gr.File(
@@ -735,42 +597,13 @@ with gr.Blocks(
             output_file_dual = gr.File(
                 label="Download Translation (Dual)", visible=False
             )
-            recaptcha_response = gr.Textbox(
-                label="reCAPTCHA Response", elem_id="verify", visible=False
-            )
-            recaptcha_box = gr.HTML('<div id="recaptcha-box"></div>')
             translate_btn = gr.Button("翻译", variant="primary")
             cancellation_btn = gr.Button("取消", variant="secondary")
-            # tech_details_tog = gr.Markdown(
-            #     tech_details_string,
-            #     elem_classes=["secondary-text"],
-            # )
             page_range.select(on_select_page, page_range, page_input)
             service.select(
                 on_select_service,
                 service,
                 envs,
-            )
-            vfont.change(on_vfont_change, inputs=vfont, outputs=None)
-            file_type.select(
-                on_select_filetype,
-                file_type,
-                [file_input, link_input],
-                js=(
-                    f"""
-                    (a,b)=>{{
-                        try{{
-                            grecaptcha.render('recaptcha-box',{{
-                                'sitekey':'{client_key}',
-                                'callback':'onVerify'
-                            }});
-                        }}catch(error){{}}
-                        return [a];
-                    }}
-                    """
-                    if flag_demo
-                    else ""
-                ),
             )
 
         with gr.Column(scale=2):
@@ -782,40 +615,18 @@ with gr.Blocks(
         lambda x: x,
         inputs=file_input,
         outputs=preview,
-        js=(
-            f"""
-            (a,b)=>{{
-                try{{
-                    grecaptcha.render('recaptcha-box',{{
-                        'sitekey':'{client_key}',
-                        'callback':'onVerify'
-                    }});
-                }}catch(error){{}}
-                return [a];
-            }}
-            """
-            if flag_demo
-            else ""
-        ),
     )
 
     state = gr.State({"session_id": None})
 
-    translate_btn.click(
-        hide_results,
-        inputs=[],
-        outputs=[
-            output_file_mono,
-            preview,
-            output_file_dual,
-            output_file_mono,
-            output_file_dual,
-            output_title,
-        ]
-    ).then(
-        translate_file,
-        inputs=[
-            file_type,
+    # 创建一个代理函数，只接收Gradio组件参数并添加固定参数
+    def translate_wrapper(file_input, link_input, service, lang_from, lang_to, page_range, page_input, state, *envs):
+        # 使用gr.Progress()创建进度条实例
+        progress = gr.Progress()
+        
+        # 返回translate_file的结果
+        return translate_file(
+            "File", # 固定值 
             file_input,
             link_input,
             service,
@@ -829,7 +640,32 @@ with gr.Blocks(
             ignore_cache,
             vfont,
             use_babeldoc,
-            recaptcha_response,
+            state,
+            progress, # 进度条
+            *envs
+        )
+
+    translate_btn.click(
+        hide_results,
+        inputs=[],
+        outputs=[
+            output_file_mono,
+            preview,
+            output_file_dual,
+            output_file_mono,
+            output_file_dual,
+            output_title,
+        ]
+    ).then(
+        translate_wrapper,
+        inputs=[
+            file_input,
+            link_input,
+            service,
+            lang_from,
+            lang_to,
+            page_range,
+            page_input,
             state,
             *envs,
         ],
@@ -841,7 +677,7 @@ with gr.Blocks(
             output_file_dual,
             output_title,
         ],
-    ).then(lambda: None, js="()=>{grecaptcha.reset()}" if flag_demo else "")
+    ).then(lambda: None)
 
     cancellation_btn.click(
         stop_translate_file,
@@ -850,23 +686,6 @@ with gr.Blocks(
 
     # 在创建完 demo 后添加这行代码
     demo.load(fn=lambda: on_select_service(service.value, None), outputs=envs)
-
-    # 添加一个处理函数来根据单选按钮的值更新lang_from和lang_to
-    def on_translation_direction_change(direction):
-        if direction == "中译英":
-            return gr.update(value="中文"), gr.update(value="英语")
-        else:  # 英译中
-            return gr.update(value="英语"), gr.update(value="中文")
-
-    # 将单选按钮与处理函数连接起来
-    translation_direction.change(
-        fn=on_translation_direction_change,
-        inputs=[translation_direction],
-        outputs=[lang_from, lang_to]
-    )
-
-    # 在demo.load后面添加这行
-    demo.load(fn=lambda: on_translation_direction_change("中译英"), outputs=[lang_from, lang_to])
 
 
 def parse_user_passwd(file_path: str) -> tuple:
@@ -913,13 +732,22 @@ def setup_gui(
         - None
     """
     user_list, html = parse_user_passwd(auth_file)
-    if flag_demo:
-        demo.launch(server_name="0.0.0.0", max_file_size="5mb", inbrowser=True)
-    else:
-        if len(user_list) == 0:
+    if len(user_list) == 0:
+        try:
+            demo.launch(
+                server_name="0.0.0.0",
+                debug=True,
+                inbrowser=True,
+                share=share,
+                server_port=server_port,
+            )
+        except Exception:
+            print(
+                "Error launching GUI using 0.0.0.0.\nThis may be caused by global mode of proxy software."
+            )
             try:
                 demo.launch(
-                    server_name="0.0.0.0",
+                    server_name="127.0.0.1",
                     debug=True,
                     inbrowser=True,
                     share=share,
@@ -927,27 +755,29 @@ def setup_gui(
                 )
             except Exception:
                 print(
-                    "Error launching GUI using 0.0.0.0.\nThis may be caused by global mode of proxy software."
+                    "Error launching GUI using 127.0.0.1.\nThis may be caused by global mode of proxy software."
                 )
-                try:
-                    demo.launch(
-                        server_name="127.0.0.1",
-                        debug=True,
-                        inbrowser=True,
-                        share=share,
-                        server_port=server_port,
-                    )
-                except Exception:
-                    print(
-                        "Error launching GUI using 127.0.0.1.\nThis may be caused by global mode of proxy software."
-                    )
-                    demo.launch(
-                        debug=True, inbrowser=True, share=True, server_port=server_port
-                    )
-        else:
+                demo.launch(
+                    debug=True, inbrowser=True, share=True, server_port=server_port
+                )
+    else:
+        try:
+            demo.launch(
+                server_name="0.0.0.0",
+                debug=True,
+                inbrowser=True,
+                share=share,
+                auth=user_list,
+                auth_message=html,
+                server_port=server_port,
+            )
+        except Exception:
+            print(
+                "Error launching GUI using 0.0.0.0.\nThis may be caused by global mode of proxy software."
+            )
             try:
                 demo.launch(
-                    server_name="0.0.0.0",
+                    server_name="127.0.0.1",
                     debug=True,
                     inbrowser=True,
                     share=share,
@@ -957,30 +787,16 @@ def setup_gui(
                 )
             except Exception:
                 print(
-                    "Error launching GUI using 0.0.0.0.\nThis may be caused by global mode of proxy software."
+                    "Error launching GUI using 127.0.0.1.\nThis may be caused by global mode of proxy software."
                 )
-                try:
-                    demo.launch(
-                        server_name="127.0.0.1",
-                        debug=True,
-                        inbrowser=True,
-                        share=share,
-                        auth=user_list,
-                        auth_message=html,
-                        server_port=server_port,
-                    )
-                except Exception:
-                    print(
-                        "Error launching GUI using 127.0.0.1.\nThis may be caused by global mode of proxy software."
-                    )
-                    demo.launch(
-                        debug=True,
-                        inbrowser=True,
-                        share=True,
-                        auth=user_list,
-                        auth_message=html,
-                        server_port=server_port,
-                    )
+                demo.launch(
+                    debug=True,
+                    inbrowser=True,
+                    share=True,
+                    auth=user_list,
+                    auth_message=html,
+                    server_port=server_port,
+                )
 
 
 # For auto-reloading while developing

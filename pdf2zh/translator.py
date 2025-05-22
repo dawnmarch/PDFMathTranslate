@@ -138,7 +138,7 @@ class BaseTranslator:
                     "You are a professional, authentic machine translation engine. "
                     "Only Output the translated text, do not include any other text."
                     "\n\n"
-                    f"Translate the following markdown source text from {self.lang_in} to {self.lang_out}. "
+                    f"Translate the following markdown source text to {self.lang_out}. "
                     "Keep the formula notation {v*} unchanged. "
                     "Output translation directly without any additional text."
                     "\n\n"
